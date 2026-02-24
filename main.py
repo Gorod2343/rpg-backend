@@ -4,7 +4,6 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
-# Твоя ссылка уже здесь!
 DATABASE_URL = "postgresql://neondb_owner:npg_StR2P5YvqGHg@ep-soft-bread-ai33v924-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 if DATABASE_URL.startswith("postgres://"):
@@ -15,17 +14,18 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 class UserProfile(Base):
-    __tablename__ = "users_final_v5"
+    __tablename__ = "users_final_v6" # Новая версия для сохранения цели воды
     username = Column(String, primary_key=True, index=True)
     total_xp = Column(Integer, default=0)
     current_month_xp = Column(Integer, default=0)
     hp = Column(Integer, default=100)
     last_active_date = Column(String, default="")
     water_count = Column(Integer, default=0)
+    water_goal = Column(Integer, default=8) # По умолчанию 8 стаканов
     completed_tasks = Column(String, default="")
 
 class History(Base):
-    __tablename__ = "history_v3"
+    __tablename__ = "history_v4"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, index=True)
     event_type = Column(String)
@@ -63,7 +63,7 @@ def get_hero(username: str):
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     if not user:
-        user = UserProfile(username=username, hp=100, last_active_date=get_today_str())
+        user = UserProfile(username=username, hp=100, last_active_date=get_today_str(), water_goal=8)
         db.add(user)
         db.commit()
     else:
@@ -75,12 +75,38 @@ def get_hero(username: str):
     
     res = {
         "total_xp": user.total_xp, "current_month_xp": user.current_month_xp, 
-        "hp": user.hp, "water_count": user.water_count, 
+        "hp": user.hp, "water_count": user.water_count, "water_goal": user.water_goal,
         "completed_tasks": user.completed_tasks, "history": hist_data
     }
     db.close()
     return res
 
+@app.post("/set_water_goal/{username}")
+def set_water_goal(username: str, goal: int):
+    db = SessionLocal()
+    user = db.query(UserProfile).filter(UserProfile.username == username).first()
+    if user:
+        user.water_goal = goal
+        add_to_history(db, username, 'gain', f'Цель воды: {goal} ст.', 0)
+        db.commit()
+    db.close()
+    return {"status": "ok", "new_goal": goal}
+
+@app.post("/drink_water/{username}")
+def drink_water(username: str):
+    db = SessionLocal()
+    user = db.query(UserProfile).filter(UserProfile.username == username).first()
+    if user.water_count < user.water_goal:
+        user.water_count += 1
+        gain = 5 if user.hp >= 30 else 2
+        user.total_xp, user.current_month_xp = user.total_xp + gain, user.current_month_xp + gain
+        user.hp = min(100, user.hp + 5)
+        add_to_history(db, username, 'gain', f'Вода {user.water_count}/{user.water_goal}', gain)
+        db.commit()
+    db.close()
+    return get_hero(username)
+
+# ... остальной код (buy_reward, add_xp) остается прежним ...
 @app.post("/buy_reward/{username}")
 def buy_reward(username: str, cost: int, name: str, qty: int = 1):
     db = SessionLocal()
@@ -89,7 +115,6 @@ def buy_reward(username: str, cost: int, name: str, qty: int = 1):
     if user.current_month_xp < total_cost:
         db.close()
         return {"error": f"Недостаточно XP! Нужно {total_cost}"}
-    
     user.current_month_xp -= total_cost
     add_to_history(db, username, 'spend', f'{name} x{qty}', total_cost)
     db.commit()
@@ -109,20 +134,6 @@ def add_xp(username: str, amount: int, task_id: str, task_name: str):
         user.current_month_xp += gain
         user.hp = min(100, user.hp + 5)
         add_to_history(db, username, 'gain', task_name, gain)
-        db.commit()
-    db.close()
-    return get_hero(username)
-
-@app.post("/drink_water/{username}")
-def drink_water(username: str):
-    db = SessionLocal()
-    user = db.query(UserProfile).filter(UserProfile.username == username).first()
-    if user.water_count < 8:
-        user.water_count += 1
-        gain = 5 if user.hp >= 30 else 2
-        user.total_xp, user.current_month_xp = user.total_xp + gain, user.current_month_xp + gain
-        user.hp = min(100, user.hp + 5)
-        add_to_history(db, username, 'gain', f'Вода {user.water_count}/8', gain)
         db.commit()
     db.close()
     return get_hero(username)
