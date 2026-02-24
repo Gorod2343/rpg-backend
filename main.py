@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ТВОЯ БАЗА ДАННЫХ
 DATABASE_URL = "postgresql://neondb_owner:npg_StR2P5YvqGHg@ep-soft-bread-ai33v924-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
@@ -14,7 +14,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 class UserProfile(Base):
-    __tablename__ = "users_final_v8" # Финальная версия для научного сна
+    __tablename__ = "users_final_v8"
     username = Column(String, primary_key=True, index=True)
     total_xp = Column(Integer, default=0)
     current_month_xp = Column(Integer, default=0)
@@ -43,7 +43,7 @@ def add_to_history(db, username, e_type, desc, amt):
     event = History(username=username, event_type=e_type, description=desc, amount=amt)
     db.add(event)
 
-def get_today_str(): return datetime.now().strftime("%Y-%m-%d")
+def get_today_str(): return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 def process_daily_updates(user, db):
     today = get_today_str()
@@ -51,7 +51,7 @@ def process_daily_updates(user, db):
         if user.last_active_date:
             try:
                 last_date = datetime.strptime(user.last_active_date, "%Y-%m-%d").date()
-                days_missed = (datetime.now().date() - last_date).days
+                days_missed = (datetime.now(timezone.utc).date() - last_date).days
                 if days_missed > 0:
                     loss = days_missed * 15
                     user.hp = max(0, user.hp - loss)
@@ -94,27 +94,39 @@ def set_water_goal(username: str, goal: int):
     return get_hero(username)
 
 @app.post("/sleep_action/{username}")
-def sleep_action(username: str):
+def sleep_action(username: str, tz: int = 0):
+    # tz - это смещение часового пояса в минутах, переданное с телефона
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     
     if not user.sleep_start:
-        # УСНУЛ
-        user.sleep_start = datetime.now().isoformat()
+        # УСНУЛ: Сохраняем строго в UTC с правильным форматом времени
+        user.sleep_start = datetime.now(timezone.utc).isoformat()
         db.commit()
         res = get_hero(username)
     else:
-        # ПРОСНУЛСЯ - НАУЧНЫЙ РАСЧЕТ
+        # ПРОСНУЛСЯ
         try:
-            start_time = datetime.fromisoformat(user.sleep_start)
-            end_time = datetime.now()
+            start_str = user.sleep_start
+            # Защита от старых данных и парсинг в UTC
+            if start_str.endswith("Z"):
+                start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            else:
+                start_time = datetime.fromisoformat(start_str)
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=timezone.utc)
+            
+            end_time = datetime.now(timezone.utc)
             duration_hours = (end_time - start_time).total_seconds() / 3600.0
+            
+            # Определяем твое МЕСТНОЕ время засыпания для анализа "Окна мелатонина"
+            local_start_time = start_time - timedelta(minutes=tz)
+            bed_h = local_start_time.hour
             
             report = []
             base_xp = 0
             hp_heal = 0
             
-            # 1. Продолжительность
             if duration_hours < 5:
                 base_xp = 10; hp_heal = 5
                 report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Критический недосып, мало циклов)")
@@ -125,27 +137,24 @@ def sleep_action(username: str):
                 base_xp = 50; hp_heal = 20
                 report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Оптимально, 5-6 циклов)")
             
-            # 2. Окно мелатонина (Во сколько лег)
-            bed_h = start_time.hour
             if 21 <= bed_h <= 23:
                 base_xp += 30
-                report.append("🧬 Отбой: Идеально! Окно мелатонина поймано. Максимум N3 (Глубокого сна).")
+                report.append("🧬 Отбой: Идеально! Окно мелатонина поймано.")
             elif bed_h == 0 or bed_h == 1:
                 base_xp += 10
-                report.append("🧬 Отбой: Допустимо, но часть глубокого N3-сна уже упущена.")
+                report.append("🧬 Отбой: Допустимо, но часть глубокого сна упущена.")
             elif 2 <= bed_h <= 5:
                 base_xp -= 10
-                report.append("🧬 Отбой: Слишком поздно. Преобладал быстрый REM-сон. Возможна разбитость.")
+                report.append("🧬 Отбой: Слишком поздно. Преобладал быстрый сон.")
             else:
                 report.append("🧬 Отбой: Дневной сон (сбиты циркадные ритмы).")
             
-            # 3. Правило 90 минут (В какой фазе проснулся)
             cycle_rem = duration_hours % 1.5
             if cycle_rem < 0.35 or cycle_rem > 1.15:
                 base_xp += 20; hp_heal += 5
-                report.append("⏰ Фаза: Пробуждение в N1/N2. Правило 90 минут сработало, вставать легко!")
+                report.append("⏰ Фаза: Пробуждение в легкой фазе. Правило 90 минут сработало!")
             else:
-                report.append("⏰ Фаза: Пробуждение посреди цикла (N3). Возможна 'сонная инерция'.")
+                report.append("⏰ Фаза: Пробуждение посреди глубокого цикла.")
             
             final_xp = max(0, base_xp)
             user.total_xp += final_xp
@@ -158,9 +167,8 @@ def sleep_action(username: str):
             db.commit()
             
             res = get_hero(username)
-            # Прикрепляем отчет к ответу
             res["sleep_report"] = "\n\n".join(report) + f"\n\n🏆 ИТОГ: +{final_xp} XP | +{hp_heal} HP"
-        except Exception:
+        except Exception as e:
             user.sleep_start = ""
             db.commit()
             res = get_hero(username)
