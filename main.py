@@ -8,12 +8,13 @@ import hmac
 import hashlib
 import urllib.parse
 import json
-8687814579:AAEcbEDRyItXDUVW3UNJd-x4vBzYrJKHTgQ
+
 # ==========================================
-# 🛑 ВСТАВЬ СЮДА ТОКЕН СВОЕГО БОТА ИЗ BOTFATHER
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА" 
+# ТОКЕН ТВОЕГО БОТА (ДЛЯ АНТИ-ЧИТА)
+BOT_TOKEN = "8687814579:AAEcbEDRyItXDUVW3UNJd-x4vBzYrJKHTgQ" 
 # ==========================================
 
+# БАЗА ДАННЫХ NEON
 DATABASE_URL = "postgresql://neondb_owner:npg_StR2P5YvqGHg@ep-soft-bread-ai33v924-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -52,7 +53,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 class HabitsPayload(BaseModel):
     habits: str
 
-# --- СЕРВЕРНАЯ БАЗА (Защита от читов) ---
+# БАЗОВЫЕ НАСТРОЙКИ (ЕСЛИ У ПОЛЬЗОВАТЕЛЯ НЕТ СВОИХ)
 DEFAULT_HABITS = [
     {"id": "task-run", "cat": "sport", "tag": "Кардио", "name": "Пробежка", "xp": 150},
     {"id": "task-strength", "cat": "sport", "tag": "Сила", "name": "Силовая тренировка", "xp": 200},
@@ -67,12 +68,14 @@ REWARDS_DB = {
     "fast": {"name": "Фаст Фуд", "cost": 600}
 }
 
-# --- КРИПТОГРАФИЯ ---
+# --- СИСТЕМА БЕЗОПАСНОСТИ ---
 def verify_tg_data(init_data: str, expected_user_id: str):
-    if not init_data: raise HTTPException(status_code=401, detail="Отказано в доступе. Нет подписи.")
+    if not init_data: 
+        raise HTTPException(status_code=401, detail="Запустите приложение через Telegram!")
     
     vals = dict(urllib.parse.parse_qsl(init_data))
-    if "hash" not in vals: raise HTTPException(status_code=401, detail="Нет хэша")
+    if "hash" not in vals: 
+        raise HTTPException(status_code=401, detail="Ошибка безопасности: нет хэша")
         
     hash_val = vals.pop("hash")
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(vals.items()))
@@ -80,17 +83,19 @@ def verify_tg_data(init_data: str, expected_user_id: str):
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
     calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
     
-    if calc_hash != hash_val: raise HTTPException(status_code=401, detail="Хакерская атака обнаружена! Подпись не совпадает.")
+    if calc_hash != hash_val: 
+        raise HTTPException(status_code=401, detail="Подпись не совпадает! Атака отклонена.")
         
     user_data = json.loads(vals.get("user", "{}"))
     if str(user_data.get("id")) != expected_user_id:
-        raise HTTPException(status_code=401, detail="Попытка подмены ID пользователя!")
+        raise HTTPException(status_code=401, detail="Попытка взлома чужого аккаунта!")
 
 def add_to_history(db, username, e_type, desc, amt):
     event = History(username=username, event_type=e_type, description=desc, amount=amt)
     db.add(event)
 
-def get_today_str(): return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def get_today_str(): 
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 def process_daily_updates(user, db):
     today = get_today_str()
@@ -107,7 +112,7 @@ def process_daily_updates(user, db):
 
 @app.get("/get_hero/{username}")
 def get_hero(username: str, x_tg_data: str = Header(None)):
-    verify_tg_data(x_tg_data, username) # ПРОВЕРКА ПОДПИСИ
+    verify_tg_data(x_tg_data, username)
     
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
@@ -201,7 +206,7 @@ def drink_water(username: str, x_tg_data: str = Header(None)):
 
 @app.post("/buy_reward/{username}")
 def buy_reward(username: str, reward_id: str, qty: int = 1, x_tg_data: str = Header(None)):
-    verify_tg_data(x_tg_data, username) # ПРОВЕРКА ПОДПИСИ
+    verify_tg_data(x_tg_data, username) 
     if reward_id not in REWARDS_DB: raise HTTPException(status_code=400, detail="Товар не найден")
     
     cost = REWARDS_DB[reward_id]["cost"]
@@ -219,11 +224,11 @@ def buy_reward(username: str, reward_id: str, qty: int = 1, x_tg_data: str = Hea
 
 @app.post("/add_xp/{username}")
 def add_xp(username: str, task_id: str, x_tg_data: str = Header(None)):
-    verify_tg_data(x_tg_data, username) # ПРОВЕРКА ПОДПИСИ
+    verify_tg_data(x_tg_data, username)
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     
-    # СЕРВЕРНЫЙ АНТИ-ЧИТ: Ищем задачу в профиле пользователя и берем очки ОТТУДА, а не от телефона
+    # Сервер сам ищет задачу и начисляет очки (защита от накрутки)
     habits = json.loads(user.custom_habits) if user.custom_habits else DEFAULT_HABITS
     task_name, amount = None, 0
     for h in habits:
@@ -233,7 +238,7 @@ def add_xp(username: str, task_id: str, x_tg_data: str = Header(None)):
             
     if not task_name: 
         db.close()
-        raise HTTPException(status_code=400, detail="Задача не найдена")
+        raise HTTPException(status_code=400, detail="Задача не найдена в вашем профиле")
 
     tasks = user.completed_tasks.split(",") if user.completed_tasks else []
     if task_id not in tasks:
