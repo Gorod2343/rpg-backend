@@ -53,52 +53,57 @@ class HabitsPayload(BaseModel):
 def verify_tg_data(init_data: str):
     if not init_data: return False
     try:
-        # Декодируем строку запроса
         vals = dict(urllib.parse.parse_qsl(init_data))
         auth_hash = vals.pop('hash')
-        # Собираем строку для проверки
         data_check_string = "\n".join([f"{k}={vals[k]}" for k in sorted(vals.keys())])
-        # Вычисляем секретный ключ
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        # Вычисляем итоговый хеш
         expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         return expected_hash == auth_hash
-    except:
-        return False
+    except: return False
 
 @app.get("/get_hero/{username}")
 def get_hero(username: str, x_tg_data: str = Header(None)):
-    # Если подпись не верна, мы всё равно пустим, НО только если это ТВОЙ ID
-    # Это поможет запустить приложение, если криптография капризничает
-    is_valid = verify_tg_data(x_tg_data)
-    
+    verify_tg_data(x_tg_data)
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     if not user:
         user = UserProfile(username=username, last_active_date=str(date.today()))
         db.add(user)
         db.commit()
-    
-    # Логика ежедневного сброса
     today_str = str(date.today())
     if user.last_active_date != today_str:
         user.water_count = 0
         user.completed_tasks = ""
         user.last_active_date = today_str
         db.commit()
-
     hist = db.query(History).filter(History.username == username).order_by(desc(History.timestamp)).limit(20).all()
     hist_data = [{"type": h.event_type, "desc": h.description, "amt": h.amount, "time": h.timestamp.strftime("%H:%M")} for h in hist]
-    
-    res = { 
-        "total_xp": user.total_xp, "current_month_xp": user.current_month_xp, 
-        "hp": user.hp, "water_count": user.water_count, "water_goal": user.water_goal, 
-        "completed_tasks": user.completed_tasks, "sleep_start": user.sleep_start, 
-        "custom_habits": user.custom_habits, "streak": user.streak, "history": hist_data,
-        "auth": "ok" if is_valid else "readonly"
-    }
+    res = { "total_xp": user.total_xp, "current_month_xp": user.current_month_xp, "hp": user.hp, "water_count": user.water_count, "water_goal": user.water_goal, "completed_tasks": user.completed_tasks, "sleep_start": user.sleep_start, "custom_habits": user.custom_habits, "streak": user.streak, "history": hist_data }
     db.close()
     return res
+
+@app.post("/add_xp/{username}")
+def add_xp(username: str, task_id: str, x_tg_data: str = Header(None)):
+    if not verify_tg_data(x_tg_data): raise HTTPException(status_code=401)
+    db = SessionLocal()
+    user = db.query(UserProfile).filter(UserProfile.username == username).first()
+    # Восстанавливаем поиск реального XP задачи
+    default_habits = [
+        {"id": "task-run", "name": "Пробежка", "xp": 150},
+        {"id": "task-strength", "name": "Силовая тренировка", "xp": 200},
+        {"id": "task-family-time", "name": "Время с семьей", "xp": 100}
+    ]
+    habits = json.loads(user.custom_habits) if user.custom_habits else default_habits
+    task = next((h for h in habits if h["id"] == task_id), None)
+    
+    if task and task_id not in (user.completed_tasks or "").split(","):
+        user.completed_tasks = f"{user.completed_tasks},{task_id}" if user.completed_tasks else task_id
+        user.total_xp += task["xp"]
+        user.current_month_xp += task["xp"]
+        db.add(History(username=username, event_type='gain', description=task["name"], amount=task["xp"]))
+        db.commit()
+    db.close()
+    return get_hero(username, x_tg_data)
 
 @app.post("/drink_water/{username}")
 def drink_water(username: str, x_tg_data: str = Header(None)):
@@ -107,31 +112,31 @@ def drink_water(username: str, x_tg_data: str = Header(None)):
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     if user and user.water_count < user.water_goal:
         user.water_count += 1
-        user.total_xp += 5
-        user.current_month_xp += 5
-        # Логика стрика
-        today = date.today()
-        yesterday = today - timedelta(days=1)
+        user.total_xp += 5; user.current_month_xp += 5
+        today = date.today(); yesterday = today - timedelta(days=1)
         if user.water_count >= user.water_goal:
-            if user.last_streak_date == str(yesterday):
-                user.streak += 1
-            elif user.last_streak_date != str(today):
-                user.streak = 1
+            if user.last_streak_date == str(yesterday): user.streak += 1
+            elif user.last_streak_date != str(today): user.streak = 1
             user.last_streak_date = str(today)
-        
         db.add(History(username=username, event_type='gain', description=f'Вода {user.water_count}/{user.water_goal}', amount=5))
         db.commit()
     db.close()
     return get_hero(username, x_tg_data)
 
-@app.post("/add_xp/{username}")
-def add_xp(username: str, task_id: str, x_tg_data: str = Header(None)):
+@app.post("/update_habits/{username}")
+def update_habits(username: str, payload: HabitsPayload, x_tg_data: str = Header(None)):
     if not verify_tg_data(x_tg_data): raise HTTPException(status_code=401)
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
-    # Упрощенный поиск задачи для теста
-    user.total_xp += 100 # Временно фиксировано для теста запуска
-    user.current_month_xp += 100
-    db.commit()
+    if user: user.custom_habits = payload.habits; db.commit()
+    db.close()
+    return get_hero(username, x_tg_data)
+
+@app.post("/set_water_goal/{username}")
+def set_water_goal(username: str, goal: int, x_tg_data: str = Header(None)):
+    if not verify_tg_data(x_tg_data): raise HTTPException(status_code=401)
+    db = SessionLocal()
+    user = db.query(UserProfile).filter(UserProfile.username == username).first()
+    if user: user.water_goal = goal; db.commit()
     db.close()
     return get_hero(username, x_tg_data)
