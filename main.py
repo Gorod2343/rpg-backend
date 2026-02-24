@@ -14,9 +14,9 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Финальная версия таблицы со всеми нужными данными
+# Самая финальная версия базы данных!
 class UserProfile(Base):
-    __tablename__ = "users_final_v1"
+    __tablename__ = "users_final_v2"
     username = Column(String, primary_key=True, index=True)
     total_xp = Column(Integer, default=0)
     current_month_xp = Column(Integer, default=0)
@@ -24,7 +24,8 @@ class UserProfile(Base):
     current_month = Column(String, default="")
     hp = Column(Integer, default=100)
     last_active_date = Column(String, default="")
-    water_count = Column(Integer, default=0) # НОВАЯ КОЛОНКА ДЛЯ ВОДЫ!
+    water_count = Column(Integer, default=0)
+    completed_tasks = Column(String, default="") # НОВАЯ КОЛОНКА ДЛЯ ГАЛОЧЕК!
 
 Base.metadata.create_all(bind=engine)
 
@@ -46,20 +47,18 @@ def get_today_str():
 
 def process_daily_updates(user):
     today = get_today_str()
-    # Если зашел впервые
     if not user.last_active_date:
         user.last_active_date = today
         user.water_count = 0
+        user.completed_tasks = ""
         return
     
-    # ЕСЛИ НАСТУПИЛ НОВЫЙ ДЕНЬ
     if user.last_active_date != today:
         try:
             last_date = datetime.strptime(user.last_active_date, "%Y-%m-%d").date()
             curr_date = datetime.strptime(today, "%Y-%m-%d").date()
             days_missed = (curr_date - last_date).days
             
-            # Отнимаем здоровье за пропуск
             if days_missed > 0:
                 user.hp -= days_missed * 15 
                 if user.hp < 0:
@@ -68,11 +67,12 @@ def process_daily_updates(user):
             pass
         
         user.last_active_date = today
-        user.water_count = 0 # СБРАСЫВАЕМ ВОДУ С НАСТУПЛЕНИЕМ НОВОГО ДНЯ!
+        user.water_count = 0 
+        user.completed_tasks = "" # С наступлением нового дня галочки стираются!
 
 @app.get("/")
 def read_root():
-    return {"status": "Сервер работает! Вода подключена к Базе Данных!"}
+    return {"status": "Сервер работает! Галочки теперь хранятся в базе!"}
 
 @app.get("/get_hero/{username}")
 def get_hero(username: str):
@@ -100,7 +100,8 @@ def get_hero(username: str):
         "current_month_xp": user.current_month_xp, 
         "last_month_xp": user.last_month_xp, 
         "hp": user.hp,
-        "water_count": user.water_count
+        "water_count": user.water_count,
+        "completed_tasks": user.completed_tasks
     }
     db.close()
     return data
@@ -109,26 +110,20 @@ def get_hero(username: str):
 def drink_water(username: str):
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
-    
     if not user:
         db.close()
         return {"error": "User not found"}
         
     process_daily_updates(user)
     
-    # Добавляем воду и очки, если выпито меньше 8 стаканов
     if user.water_count < 8:
         user.water_count += 1
-        
-        # Дебафф Здоровья
         actual_amount = 5
         if user.hp < 30:
             actual_amount = 2
             
         user.total_xp += actual_amount
         user.current_month_xp += actual_amount
-        
-        # Лечение
         user.hp += 5
         if user.hp > 100:
             user.hp = 100
@@ -142,13 +137,14 @@ def drink_water(username: str):
         "current_month_xp": user.current_month_xp, 
         "last_month_xp": user.last_month_xp, 
         "hp": user.hp,
-        "water_count": user.water_count
+        "water_count": user.water_count,
+        "completed_tasks": user.completed_tasks
     }
     db.close()
     return data
 
 @app.post("/add_xp/{username}")
-def add_xp(username: str, amount: int):
+def add_xp(username: str, amount: int, task_id: str = ""):
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     current_month = get_current_month_str()
@@ -163,17 +159,29 @@ def add_xp(username: str, amount: int):
             user.current_month = current_month
         process_daily_updates(user)
     
-    actual_amount = amount
-    if user.hp < 30:
-        actual_amount = amount // 2
-        
-    user.total_xp += actual_amount
-    user.current_month_xp += actual_amount
+    # === ЗАЩИТА ОТ ДВОЙНЫХ НАЖАТИЙ ===
+    tasks_list = user.completed_tasks.split(",") if user.completed_tasks else []
     
-    user.hp += 5
-    if user.hp > 100:
-        user.hp = 100
+    if task_id and task_id in tasks_list:
+        # Если задача уже есть в списке базы, просто отдаем текущие данные (опыт не даем)
+        pass
+    else:
+        # Если задачи нет, записываем её в базу и даем опыт
+        if task_id:
+            tasks_list.append(task_id)
+            user.completed_tasks = ",".join(tasks_list)
+            
+        actual_amount = amount
+        if user.hp < 30:
+            actual_amount = amount // 2
+            
+        user.total_xp += actual_amount
+        user.current_month_xp += actual_amount
         
+        user.hp += 5
+        if user.hp > 100:
+            user.hp = 100
+            
     user.last_active_date = get_today_str() 
     
     db.commit()
@@ -184,7 +192,8 @@ def add_xp(username: str, amount: int):
         "current_month_xp": user.current_month_xp, 
         "last_month_xp": user.last_month_xp, 
         "hp": user.hp,
-        "water_count": user.water_count
+        "water_count": user.water_count,
+        "completed_tasks": user.completed_tasks
     }
     db.close()
     return data
