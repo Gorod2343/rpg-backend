@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
+# ТВОЯ БАЗА ДАННЫХ
 DATABASE_URL = "postgresql://neondb_owner:npg_StR2P5YvqGHg@ep-soft-bread-ai33v924-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -13,7 +14,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 class UserProfile(Base):
-    __tablename__ = "users_final_v7" # Версия с трекером сна
+    __tablename__ = "users_final_v8" # Финальная версия для научного сна
     username = Column(String, primary_key=True, index=True)
     total_xp = Column(Integer, default=0)
     current_month_xp = Column(Integer, default=0)
@@ -22,10 +23,10 @@ class UserProfile(Base):
     water_count = Column(Integer, default=0)
     water_goal = Column(Integer, default=8)
     completed_tasks = Column(String, default="")
-    sleep_start = Column(String, default="") # НОВАЯ КОЛОНКА ДЛЯ СНА
+    sleep_start = Column(String, default="") 
 
 class History(Base):
-    __tablename__ = "history_v5"
+    __tablename__ = "history_v6"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, index=True)
     event_type = Column(String)
@@ -57,7 +58,6 @@ def process_daily_updates(user, db):
                     add_to_history(db, user.username, 'spend', f'Пропуск ({days_missed} дн.)', loss)
             except: pass
         user.last_active_date, user.water_count, user.completed_tasks = today, 0, ""
-        # Сон не сбрасываем, так как человек может спать во время смены суток!
 
 @app.get("/get_hero/{username}")
 def get_hero(username: str):
@@ -88,22 +88,7 @@ def set_water_goal(username: str, goal: int):
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     if user:
         user.water_goal = goal
-        add_to_history(db, username, 'gain', f'Новая цель воды: {goal} ст.', 0)
-        db.commit()
-    db.close()
-    return get_hero(username)
-
-@app.post("/drink_water/{username}")
-def drink_water(username: str):
-    db = SessionLocal()
-    user = db.query(UserProfile).filter(UserProfile.username == username).first()
-    if user.water_count < user.water_goal:
-        user.water_count += 1
-        gain = 5 if user.hp >= 30 else 2
-        user.total_xp += gain
-        user.current_month_xp += gain
-        user.hp = min(100, user.hp + 5)
-        add_to_history(db, username, 'gain', f'Вода {user.water_count}/{user.water_goal}', gain)
+        add_to_history(db, username, 'gain', f'Новая норма: {goal} ст.', 0)
         db.commit()
     db.close()
     return get_hero(username)
@@ -117,31 +102,84 @@ def sleep_action(username: str):
         # УСНУЛ
         user.sleep_start = datetime.now().isoformat()
         db.commit()
+        res = get_hero(username)
     else:
-        # ПРОСНУЛСЯ
+        # ПРОСНУЛСЯ - НАУЧНЫЙ РАСЧЕТ
         try:
             start_time = datetime.fromisoformat(user.sleep_start)
-            hours_slept = (datetime.now() - start_time).total_seconds() / 3600
+            end_time = datetime.now()
+            duration_hours = (end_time - start_time).total_seconds() / 3600.0
             
-            if hours_slept < 5:
-                gain = 10
-                desc = f'Плохой сон ({round(hours_slept, 1)} ч)'
-            elif 5 <= hours_slept < 7:
-                gain = 30
-                desc = f'Средний сон ({round(hours_slept, 1)} ч)'
+            report = []
+            base_xp = 0
+            hp_heal = 0
+            
+            # 1. Продолжительность
+            if duration_hours < 5:
+                base_xp = 10; hp_heal = 5
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Критический недосып, мало циклов)")
+            elif 5 <= duration_hours < 7.5:
+                base_xp = 30; hp_heal = 10
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Средний сон, ~4 цикла)")
             else:
-                gain = 50
-                desc = f'Отличный сон ({round(hours_slept, 1)} ч)'
-                
-            user.total_xp += gain
-            user.current_month_xp += gain
-            user.hp = min(100, user.hp + 15) # Сон хорошо лечит!
-            add_to_history(db, username, 'gain', desc, gain)
-        except:
-            pass
-        user.sleep_start = ""
+                base_xp = 50; hp_heal = 20
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Оптимально, 5-6 циклов)")
+            
+            # 2. Окно мелатонина (Во сколько лег)
+            bed_h = start_time.hour
+            if 21 <= bed_h <= 23:
+                base_xp += 30
+                report.append("🧬 Отбой: Идеально! Окно мелатонина поймано. Максимум N3 (Глубокого сна).")
+            elif bed_h == 0 or bed_h == 1:
+                base_xp += 10
+                report.append("🧬 Отбой: Допустимо, но часть глубокого N3-сна уже упущена.")
+            elif 2 <= bed_h <= 5:
+                base_xp -= 10
+                report.append("🧬 Отбой: Слишком поздно. Преобладал быстрый REM-сон. Возможна разбитость.")
+            else:
+                report.append("🧬 Отбой: Дневной сон (сбиты циркадные ритмы).")
+            
+            # 3. Правило 90 минут (В какой фазе проснулся)
+            cycle_rem = duration_hours % 1.5
+            if cycle_rem < 0.35 or cycle_rem > 1.15:
+                base_xp += 20; hp_heal += 5
+                report.append("⏰ Фаза: Пробуждение в N1/N2. Правило 90 минут сработало, вставать легко!")
+            else:
+                report.append("⏰ Фаза: Пробуждение посреди цикла (N3). Возможна 'сонная инерция'.")
+            
+            final_xp = max(0, base_xp)
+            user.total_xp += final_xp
+            user.current_month_xp += final_xp
+            user.hp = min(100, user.hp + hp_heal)
+            
+            add_to_history(db, username, 'gain', f'Сон ({round(duration_hours, 1)}ч)', final_xp)
+            
+            user.sleep_start = ""
+            db.commit()
+            
+            res = get_hero(username)
+            # Прикрепляем отчет к ответу
+            res["sleep_report"] = "\n\n".join(report) + f"\n\n🏆 ИТОГ: +{final_xp} XP | +{hp_heal} HP"
+        except Exception:
+            user.sleep_start = ""
+            db.commit()
+            res = get_hero(username)
+            
+    db.close()
+    return res
+
+@app.post("/drink_water/{username}")
+def drink_water(username: str):
+    db = SessionLocal()
+    user = db.query(UserProfile).filter(UserProfile.username == username).first()
+    if user.water_count < user.water_goal:
+        user.water_count += 1
+        gain = 5 if user.hp >= 30 else 2
+        user.total_xp += gain
+        user.current_month_xp += gain
+        user.hp = min(100, user.hp + 5)
+        add_to_history(db, username, 'gain', f'Вода {user.water_count}/{user.water_goal}', gain)
         db.commit()
-    
     db.close()
     return get_hero(username)
 
