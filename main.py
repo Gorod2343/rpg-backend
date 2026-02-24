@@ -95,31 +95,33 @@ def set_water_goal(username: str, goal: int):
 
 @app.post("/sleep_action/{username}")
 def sleep_action(username: str, tz: int = 0):
-    # tz - это смещение часового пояса в минутах, переданное с телефона
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.username == username).first()
     
     if not user.sleep_start:
-        # УСНУЛ: Сохраняем строго в UTC с правильным форматом времени
         user.sleep_start = datetime.now(timezone.utc).isoformat()
         db.commit()
         res = get_hero(username)
     else:
-        # ПРОСНУЛСЯ
         try:
             start_str = user.sleep_start
-            # Защита от старых данных и парсинг в UTC
             if start_str.endswith("Z"):
                 start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
             else:
                 start_time = datetime.fromisoformat(start_str)
-                if start_time.tzinfo is None:
-                    start_time = start_time.replace(tzinfo=timezone.utc)
+                if start_time.tzinfo is None: start_time = start_time.replace(tzinfo=timezone.utc)
             
             end_time = datetime.now(timezone.utc)
             duration_hours = (end_time - start_time).total_seconds() / 3600.0
             
-            # Определяем твое МЕСТНОЕ время засыпания для анализа "Окна мелатонина"
+            # ЗАЩИТА ОТ ЧИТОВ: Если меньше 30 минут - отмена
+            if duration_hours < 0.5:
+                user.sleep_start = ""
+                db.commit()
+                res = get_hero(username)
+                res["sleep_report"] = "⏳ Сон отменен. Вы спали меньше 30 минут, это не считается полноценным отдыхом."
+                return res
+
             local_start_time = start_time - timedelta(minutes=tz)
             bed_h = local_start_time.hour
             
@@ -127,48 +129,49 @@ def sleep_action(username: str, tz: int = 0):
             base_xp = 0
             hp_heal = 0
             
-            if duration_hours < 5:
+            # Дневной сон / Дремота (от 30 мин до 3 часов)
+            if duration_hours < 3:
                 base_xp = 10; hp_heal = 5
-                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Критический недосып, мало циклов)")
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Короткий восстановительный сон)")
+            elif 3 <= duration_hours < 5:
+                base_xp = 15; hp_heal = 10
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Критический недосып)")
             elif 5 <= duration_hours < 7.5:
-                base_xp = 30; hp_heal = 10
-                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Средний сон, ~4 цикла)")
+                base_xp = 30; hp_heal = 15
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Средний сон)")
             else:
                 base_xp = 50; hp_heal = 20
-                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Оптимально, 5-6 циклов)")
+                report.append(f"⏳ Время: {round(duration_hours, 1)}ч (Оптимальный сон)")
             
-            if 21 <= bed_h <= 23:
-                base_xp += 30
-                report.append("🧬 Отбой: Идеально! Окно мелатонина поймано.")
-            elif bed_h == 0 or bed_h == 1:
-                base_xp += 10
-                report.append("🧬 Отбой: Допустимо, но часть глубокого сна упущена.")
-            elif 2 <= bed_h <= 5:
-                base_xp -= 10
-                report.append("🧬 Отбой: Слишком поздно. Преобладал быстрый сон.")
-            else:
-                report.append("🧬 Отбой: Дневной сон (сбиты циркадные ритмы).")
-            
-            cycle_rem = duration_hours % 1.5
-            if cycle_rem < 0.35 or cycle_rem > 1.15:
-                base_xp += 20; hp_heal += 5
-                report.append("⏰ Фаза: Пробуждение в легкой фазе. Правило 90 минут сработало!")
-            else:
-                report.append("⏰ Фаза: Пробуждение посреди глубокого цикла.")
-            
+            # Бонусы работают ТОЛЬКО если спал больше 3 часов!
+            if duration_hours >= 3:
+                if 21 <= bed_h <= 23:
+                    base_xp += 30
+                    report.append("🧬 Отбой: Идеально! Окно мелатонина поймано (+30 XP).")
+                elif bed_h == 0 or bed_h == 1:
+                    base_xp += 10
+                    report.append("🧬 Отбой: Допустимо (+10 XP).")
+                elif 2 <= bed_h <= 5:
+                    base_xp -= 10
+                    report.append("🧬 Отбой: Слишком поздно (-10 XP).")
+                
+                cycle_rem = duration_hours % 1.5
+                if cycle_rem < 0.35 or cycle_rem > 1.15:
+                    base_xp += 20; hp_heal += 5
+                    report.append("⏰ Фаза: Пробуждение в легкой фазе (+20 XP).")
+
             final_xp = max(0, base_xp)
             user.total_xp += final_xp
             user.current_month_xp += final_xp
             user.hp = min(100, user.hp + hp_heal)
             
             add_to_history(db, username, 'gain', f'Сон ({round(duration_hours, 1)}ч)', final_xp)
-            
             user.sleep_start = ""
             db.commit()
             
             res = get_hero(username)
             res["sleep_report"] = "\n\n".join(report) + f"\n\n🏆 ИТОГ: +{final_xp} XP | +{hp_heal} HP"
-        except Exception as e:
+        except Exception:
             user.sleep_start = ""
             db.commit()
             res = get_hero(username)
