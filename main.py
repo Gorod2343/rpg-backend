@@ -106,7 +106,7 @@ class History(Base):
 Base.metadata.create_all(bind=engine)
 
 # ---------------------------------------------------------------------------
-# Авторизация: предвычисленный secret_key
+# Авторизация
 # ---------------------------------------------------------------------------
 _SECRET_KEY: bytes = hmac.new(
     b"WebAppData",
@@ -128,14 +128,8 @@ def verify_and_extract_user(init_data: Optional[str]) -> dict:
         if now - auth_date > INIT_DATA_TTL:
             raise HTTPException(status_code=401, detail="Init data expired")
 
-        data_check_string = "\n".join(
-            f"{k}={params[k]}" for k in sorted(params.keys())
-        )
-        expected_hash = hmac.new(
-            _SECRET_KEY,
-            data_check_string.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        data_check_string = "\n".join(f"{k}={params[k]}" for k in sorted(params.keys()))
+        expected_hash = hmac.new(_SECRET_KEY, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(expected_hash, received_hash):
             raise HTTPException(status_code=401, detail="Invalid signature")
@@ -145,7 +139,6 @@ def verify_and_extract_user(init_data: Optional[str]) -> dict:
             raise HTTPException(status_code=401, detail="No user id")
 
         return user
-
     except HTTPException:
         raise
     except Exception as e:
@@ -160,13 +153,9 @@ def require_auth(init_data: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 def rate_limit_by_user(request: Request) -> str:
     init_data = request.headers.get("X-Telegram-Init-Data", "")
-    if not init_data:
-        return get_remote_address(request)
-    try:
-        user = verify_and_extract_user(init_data)
-        return f"user:{user['id']}"
-    except Exception:
-        return get_remote_address(request)
+    if not init_data: return get_remote_address(request)
+    try: return f"user:{verify_and_extract_user(init_data)['id']}"
+    except Exception: return get_remote_address(request)
 
 limiter = Limiter(key_func=rate_limit_by_user)
 
@@ -186,6 +175,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 class TaskCompletePayload(BaseModel):
     task_id: str = Field(..., max_length=64)
+    custom_name: Optional[str] = Field(default=None, max_length=100)
+    custom_xp: Optional[int] = Field(default=None, ge=1, le=10000)
 
 class RewardBuyPayload(BaseModel):
     reward_id: str = Field(..., max_length=64)
@@ -206,16 +197,11 @@ class SleepPayload(BaseModel):
 @contextmanager
 def get_db():
     db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    try: yield db
+    finally: db.close()
 
-def get_today_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-def get_current_month_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+def get_today_str() -> str: return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def get_current_month_str() -> str: return datetime.now(timezone.utc).strftime("%Y-%m")
 
 def add_to_history(db, user_id: str, e_type: str, description: str, amt: int) -> None:
     db.add(History(user_id=user_id, event_type=e_type, description=description, amount=amt))
@@ -223,49 +209,24 @@ def add_to_history(db, user_id: str, e_type: str, description: str, amt: int) ->
 def trim_history_background(user_id: str) -> None:
     try:
         with get_db() as db:
-            count = (
-                db.query(func.count(History.id))
-                .filter(History.user_id == user_id)
-                .scalar()
-            ) or 0
-
-            if count <= HISTORY_LIMIT:
-                return
-
+            count = db.query(func.count(History.id)).filter(History.user_id == user_id).scalar() or 0
+            if count <= HISTORY_LIMIT: return
             to_delete = min(count - HISTORY_LIMIT, HISTORY_DELETE_BATCH)
-            oldest_ids = (
-                db.query(History.id)
-                .filter(History.user_id == user_id)
-                .order_by(History.timestamp.asc())
-                .limit(to_delete)
-                .subquery()
-            )
+            oldest_ids = db.query(History.id).filter(History.user_id == user_id).order_by(History.timestamp.asc()).limit(to_delete).subquery()
             db.query(History).filter(History.id.in_(oldest_ids)).delete(synchronize_session=False)
             db.commit()
-    except Exception as e:
-        logger.warning(f"trim_history error user={user_id}: {e}")
+    except Exception as e: logger.warning(f"trim_history error: {e}")
 
 def get_or_create_user_in_tx(db, user_id: str) -> UserProfile:
-    user = (
-        db.query(UserProfile)
-        .filter(UserProfile.user_id == user_id)
-        .with_for_update()
-        .first()
-    )
+    user = db.query(UserProfile).filter(UserProfile.user_id == user_id).with_for_update().first()
     if not user:
-        user = UserProfile(
-            user_id=user_id,
-            hp=100,
-            last_active_date=get_today_str(),
-            last_active_month=get_current_month_str(),
-            water_goal=8,
-        )
+        user = UserProfile(user_id=user_id, hp=100, last_active_date=get_today_str(), last_active_month=get_current_month_str(), water_goal=8)
         db.add(user)
         db.flush()
     return user
 
 def process_daily_updates(user: UserProfile, db) -> None:
-    today         = get_today_str()
+    today = get_today_str()
     current_month = get_current_month_str()
 
     if user.last_active_month != current_month:
@@ -282,46 +243,25 @@ def process_daily_updates(user: UserProfile, db) -> None:
                     user.hp    = max(0, user.hp - loss)
                     user.streak = 0
                     add_to_history(db, user.user_id, "spend", f"Пропуск ({days_missed} дн.)", loss)
-            except Exception as e:
-                logger.warning(f"process_daily_updates error user={user.user_id}: {e}")
+            except Exception as e: pass
         user.last_active_date = today
         user.water_count      = 0
 
 def get_completed_today(db, user_id: str) -> set[str]:
     today = get_today_str()
-    rows  = (
-        db.query(CompletedTask.task_id)
-        .filter(CompletedTask.user_id == user_id, CompletedTask.date == today)
-        .all()
-    )
+    rows  = db.query(CompletedTask.task_id).filter(CompletedTask.user_id == user_id, CompletedTask.date == today).all()
     return {r.task_id for r in rows}
 
 def build_hero_response(db, user: UserProfile) -> dict:
-    hist = (
-        db.query(History)
-        .filter(History.user_id == user.user_id)
-        .order_by(desc(History.timestamp))
-        .limit(20)
-        .all()
-    )
-    hist_data = [
-        {
-            "type": h.event_type,
-            "desc": h.description,
-            "amt":  h.amount,
-            "time": h.timestamp.isoformat() if h.timestamp else "",
-        }
-        for h in hist
-    ]
-    completed_today = get_completed_today(db, user.user_id)
-
+    hist = db.query(History).filter(History.user_id == user.user_id).order_by(desc(History.timestamp)).limit(20).all()
+    hist_data = [{"type": h.event_type, "desc": h.description, "amt": h.amount, "time": h.timestamp.isoformat() if h.timestamp else ""} for h in hist]
     return {
         "total_xp":         user.total_xp,
         "current_month_xp": user.current_month_xp,
         "hp":               user.hp,
         "water_count":      user.water_count,
         "water_goal":       user.water_goal,
-        "completed_tasks":  ",".join(completed_today),
+        "completed_tasks":  ",".join(get_completed_today(db, user.user_id)),
         "sleep_start":      user.sleep_start,
         "custom_habits":    user.custom_habits,
         "streak":           user.streak,
@@ -345,29 +285,30 @@ def get_hero(request: Request, x_telegram_init_data: Optional[str] = Header(None
 
 @app.post("/tasks/complete")
 @limiter.limit("30/minute")
-def complete_task(
-    request: Request,
-    payload: TaskCompletePayload,
-    background_tasks: BackgroundTasks,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def complete_task(request: Request, payload: TaskCompletePayload, background_tasks: BackgroundTasks, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
-    task = TASKS.get(payload.task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_name = ""
+    task_xp = 0
+
+    if payload.task_id.startswith("task-custom-"):
+        if not payload.custom_name or not payload.custom_xp:
+            raise HTTPException(status_code=400, detail="Missing custom task data")
+        task_name = payload.custom_name
+        task_xp = payload.custom_xp
+    else:
+        task = TASKS.get(payload.task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        task_name = task["name"]
+        task_xp = task["xp"]
 
     with get_db() as db:
         user = get_or_create_user_in_tx(db, user_id)
         process_daily_updates(user, db)
         today = get_today_str()
 
-        already_done = db.query(CompletedTask).filter(
-            CompletedTask.user_id == user_id,
-            CompletedTask.task_id == payload.task_id,
-            CompletedTask.date    == today,
-        ).first()
-
-        if already_done:
+        if db.query(CompletedTask).filter(CompletedTask.user_id == user_id, CompletedTask.task_id == payload.task_id, CompletedTask.date == today).first():
             db.commit()
             return build_hero_response(db, user)
 
@@ -381,11 +322,11 @@ def complete_task(
                 db2.commit()
                 return build_hero_response(db2, user2)
 
-        gain                   = task["xp"] if user.hp >= 30 else task["xp"] // 2
+        gain                   = task_xp if user.hp >= 30 else task_xp // 2
         user.total_xp         += gain
         user.current_month_xp += gain
         user.hp                = min(100, user.hp + 5)
-        add_to_history(db, user_id, "gain", task["name"], gain)
+        add_to_history(db, user_id, "gain", task_name, gain)
         db.commit()
 
         background_tasks.add_task(trim_history_background, user_id)
@@ -393,17 +334,10 @@ def complete_task(
 
 @app.post("/rewards/buy")
 @limiter.limit("20/minute")
-def buy_reward(
-    request: Request,
-    payload: RewardBuyPayload,
-    background_tasks: BackgroundTasks,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def buy_reward(request: Request, payload: RewardBuyPayload, background_tasks: BackgroundTasks, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
     reward = REWARDS.get(payload.reward_id)
-    if not reward:
-        raise HTTPException(status_code=404, detail="Reward not found")
-
+    if not reward: raise HTTPException(status_code=404, detail="Reward not found")
     total_cost = reward["cost"] * payload.qty
 
     with get_db() as db:
@@ -415,17 +349,12 @@ def buy_reward(
         user.current_month_xp -= total_cost
         add_to_history(db, user_id, "spend", f"{reward['name']} x{payload.qty}", total_cost)
         db.commit()
-
         background_tasks.add_task(trim_history_background, user_id)
         return build_hero_response(db, user)
 
 @app.post("/health/drink")
 @limiter.limit("30/minute")
-def drink_water(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def drink_water(request: Request, background_tasks: BackgroundTasks, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
     with get_db() as db:
         user = get_or_create_user_in_tx(db, user_id)
@@ -439,17 +368,12 @@ def drink_water(
             user.hp                = min(100, user.hp + 5)
             add_to_history(db, user_id, "gain", f"Вода {user.water_count}/{user.water_goal}", gain)
             background_tasks.add_task(trim_history_background, user_id)
-
         db.commit()
         return build_hero_response(db, user)
 
 @app.post("/health/set-goal")
 @limiter.limit("10/minute")
-def set_water_goal(
-    request: Request,
-    payload: WaterGoalPayload,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def set_water_goal(request: Request, payload: WaterGoalPayload, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
     with get_db() as db:
         user = get_or_create_user_in_tx(db, user_id)
@@ -459,12 +383,7 @@ def set_water_goal(
 
 @app.post("/sleep/action")
 @limiter.limit("10/minute")
-def sleep_action(
-    request: Request,
-    payload: SleepPayload,
-    background_tasks: BackgroundTasks,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def sleep_action(request: Request, payload: SleepPayload, background_tasks: BackgroundTasks, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
     with get_db() as db:
         user = get_or_create_user_in_tx(db, user_id)
@@ -492,24 +411,16 @@ def sleep_action(
             bed_h       = local_start.hour
             report, base_xp, hp_heal = [], 0, 0
 
-            if duration_hours < 3:
-                base_xp, hp_heal = 10, 5;  report.append(f"⏳ {round(duration_hours,1)}ч (Очень короткий)")
-            elif duration_hours < 5:
-                base_xp, hp_heal = 15, 10; report.append(f"⏳ {round(duration_hours,1)}ч (Недосып)")
-            elif duration_hours < 7.5:
-                base_xp, hp_heal = 30, 15; report.append(f"⏳ {round(duration_hours,1)}ч (Средний сон)")
-            else:
-                base_xp, hp_heal = 50, 20; report.append(f"⏳ {round(duration_hours,1)}ч (Оптимальный сон)")
+            if duration_hours < 3: base_xp, hp_heal = 10, 5;  report.append(f"⏳ {round(duration_hours,1)}ч (Очень короткий)")
+            elif duration_hours < 5: base_xp, hp_heal = 15, 10; report.append(f"⏳ {round(duration_hours,1)}ч (Недосып)")
+            elif duration_hours < 7.5: base_xp, hp_heal = 30, 15; report.append(f"⏳ {round(duration_hours,1)}ч (Средний сон)")
+            else: base_xp, hp_heal = 50, 20; report.append(f"⏳ {round(duration_hours,1)}ч (Оптимальный сон)")
 
             if duration_hours >= 3:
-                if 21 <= bed_h <= 23:
-                    base_xp += 30; report.append("🧬 Идеальное время засыпания (+30 XP).")
-                elif bed_h in (0, 1):
-                    base_xp += 10; report.append("🧬 Допустимое время засыпания (+10 XP).")
-                elif 2 <= bed_h <= 5:
-                    base_xp -= 10; report.append("🧬 Слишком поздно (-10 XP).")
-                cycle_rem = duration_hours % 1.5
-                if cycle_rem < 0.35 or cycle_rem > 1.15:
+                if 21 <= bed_h <= 23: base_xp += 30; report.append("🧬 Идеальное время засыпания (+30 XP).")
+                elif bed_h in (0, 1): base_xp += 10; report.append("🧬 Допустимое время засыпания (+10 XP).")
+                elif 2 <= bed_h <= 5: base_xp -= 10; report.append("🧬 Слишком поздно (-10 XP).")
+                if (duration_hours % 1.5) < 0.35 or (duration_hours % 1.5) > 1.15:
                     base_xp += 20; hp_heal += 5
                     report.append("⏰ Пробуждение в лёгкой фазе (+20 XP).")
 
@@ -534,11 +445,7 @@ def sleep_action(
 
 @app.post("/habits/update")
 @limiter.limit("10/minute")
-def update_habits(
-    request: Request,
-    payload: HabitsPayload,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
+def update_habits(request: Request, payload: HabitsPayload, x_telegram_init_data: Optional[str] = Header(None)):
     user_id = require_auth(x_telegram_init_data)
     with get_db() as db:
         user = get_or_create_user_in_tx(db, user_id)
