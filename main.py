@@ -10,7 +10,8 @@ from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, validator
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Date, Text, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
@@ -839,3 +840,25 @@ async def get_history(request: Request, auth: dict = Depends(get_current_user)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ─────────────────────────────────────────────
+# STATIC FILES — serve frontend
+# ─────────────────────────────────────────────
+import pathlib
+
+STATIC_DIR = pathlib.Path(__file__).parent
+
+@app.get("/")
+async def serve_index():
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="index.html not found")
+    return FileResponse(index_path, media_type="text/html")
+
+@app.get("/app.js")
+async def serve_appjs():
+    js_path = STATIC_DIR / "app.js"
+    if not js_path.exists():
+        raise HTTPException(status_code=404, detail="app.js not found")
+    return FileResponse(js_path, media_type="application/javascript")
